@@ -14,7 +14,7 @@ import telebot
 from telebot import types
 
 # ─────────────────────────────────────────────────────────────
-TOKEN = "8957659231:AAHnCq3wxmlAUv3-hxpv-c4INZgSwchkvTE"
+TOKEN = "8957659231:AAEq8JWsXaKtvZobfubGdNf_3sDUZriMBbo"
 ADMIN_CHAT_ID = int(os.environ.get("TG_ADMIN_ID", "8789271943"))
 # ─────────────────────────────────────────────────────────────
 
