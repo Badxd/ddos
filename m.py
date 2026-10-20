@@ -366,7 +366,7 @@ def show_help(message):
 💥 /admincmd : Shows All Admin Commands.
 
 Buy From :- @BadMundaXd
-Official Channel :- https://t.me/+Bz7yCgbYk7RkNzQ9
+Official Channel :- https://t.me/+e9pTCJLb6oFiMzE1
 '''
     for handler in bot.message_handlers:
         if hasattr(handler, 'commands'):
@@ -393,7 +393,7 @@ def welcome_rules(message):
 
 1. Dont Run Too Many Attacks !! Cause A Ban From Bot
 2. Dont Run 2 Attacks At Same Time Becz If U Then U Got Banned From Bot.
-3. MAKE SURE YOU JOINED https://t.me/+Bz7yCgbYk7RkNzQ9 OTHERWISE NOT WORK
+3. MAKE SURE YOU JOINED https://t.me/+e9pTCJLb6oFiMzE1 OTHERWISE NOT WORK
 4. We Daily Checks The Logs So Follow these rules to avoid Ban!!'''
     bot.reply_to(message, response)
 
