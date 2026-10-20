@@ -1,12 +1,16 @@
 {
-  "name": "tg-ddos-bot",
-  "description": "Telegram bot interface",
+  "name": "Demo Telegram Bot",
+  "description": "Simple Telegram bot hosted on Heroku",
   "env": {
-    "TG_BOT_TOKEN": { "required": true },
-    "TG_ADMIN_IDS": { "required": true },
-    "APP_URL": { "required": true }
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    }
   },
   "formation": {
-    "web": { "quantity": 1, "size": "basic" }
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
   }
 }
