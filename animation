@@ -1,0 +1,29 @@
+
+import time
+import sys
+
+frames = [
+    "⠋ Loading...",
+    "⠙ Loading...",
+    "⠹ Loading...",
+    "⠸ Loading...",
+    "⠼ Loading...",
+    "⠴ Loading...",
+    "⠦ Loading...",
+    "⠧ Loading...",
+    "⠇ Loading...",
+    "⠏ Loading..."
+]
+
+try:
+    for _ in range(3):
+        for frame in frames:
+            sys.stdout.write("\r\033[96m" + frame + "\033[0m")
+            sys.stdout.flush()
+            time.sleep(0.1)
+
+    sys.stdout.write("\r\033[92m✓ Animation completed!\033[0m\n")
+    sys.stdout.flush()
+
+except KeyboardInterrupt:
+    print("\nAnimation stopped.")
