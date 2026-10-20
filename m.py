@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 
-import telebot
-import subprocess
-import requests
-import datetime
 import os
+import subprocess
+import logging
+import datetime
+from telebot import TeleBot, types
 
 
 bot = telebot.TeleBot(os.environ.get("BOT_TOKEN", ""))
