@@ -7,7 +7,7 @@ import datetime
 import os
 
 
-bot = telebot.TeleBot('8898781304:AAH2nyZmsnDhZALCZ0IiTLMD425tGRp9Ll4')
+bot = telebot.TeleBot(os.environ.get("BOT_TOKEN", ""))
 
 # Admin user IDs
 admin_id = ["8789271943"]
