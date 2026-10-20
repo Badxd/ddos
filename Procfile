@@ -1,1 +1,1 @@
-worker: python bot.py
+worker: chmod +x king && python bot.py
