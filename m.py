@@ -2,6 +2,7 @@
 
 import telebot
 import subprocess
+import sys
 import requests
 import datetime
 import os
