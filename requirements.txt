@@ -3,3 +3,6 @@ flask==3.0.3
 gunicorn==22.0.0
 requests
 psutil
+# MongoDB (replaces Redis)
+motor==3.6.0
+pymongo==4.9.2
