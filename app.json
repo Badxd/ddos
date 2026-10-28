@@ -1,7 +1,6 @@
-
 {
   "name": "Demo Telegram Bot",
-  "description": "Simple Telegram bot hosted on Heroku",
+  "description": "Telegram DDoS bot — MongoDB-backed users, multi-vector engine",
   "env": {
     "BOT_TOKEN": {
       "description": "Your Telegram Bot Token from @BotFather",
@@ -9,11 +8,20 @@
     },
     "API_ID": {
       "description": "Your Telegram API ID from my.telegram.org",
-      "required": true
+      "required": false
     },
     "API_HASH": {
       "description": "Your Telegram API Hash from my.telegram.org",
-      "required": true
+      "required": false
+    },
+    "MONGO_URI": {
+      "description": "MongoDB connection string (MongoDB Atlas free tier works). Leave empty to fall back to local files.",
+      "required": false
+    },
+    "MONGO_DB": {
+      "description": "Mongo database name",
+      "value": "ddosbot",
+      "required": false
     }
   },
   "formation": {
