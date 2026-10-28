@@ -5,7 +5,7 @@ import threading
 import telebot
 
 import config
-from king import attack, start_attack, VECTORS
+from king import attack, VECTORS
 
 # ── Mongo / Config / User / Logging Code (Same as before) ──────────────────
 # (Maine eh saara code same rakheya hai, sirf attack part change kitta hai)
