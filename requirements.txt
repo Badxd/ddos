@@ -6,3 +6,4 @@ psutil
 # MongoDB (replaces Redis)
 motor==3.6.0
 pymongo==4.9.2
+pyrogram
