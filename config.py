@@ -1,4 +1,3 @@
-
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -15,7 +14,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 # Telegram Userbot
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
 
 # MongoDB
 MONGO_URI = os.getenv("MONGO_URI", "")
@@ -38,7 +36,10 @@ MAX_DURATION = 1000
 DEFAULT_DURATION = 60
 PAYLOAD_SIZE = 1024
 
+# MISSING VARIABLES ADDED HERE:
+VECTORS = ("udp", "tcp", "http")
+DEFAULT_VECTOR = "udp"
 
 # File paths
-USER_FILE = BASE_DIR / "users.txt"
-LOG_FILE = BASE_DIR / "log.txt"
+USER_FILE = str(BASE_DIR / "users.txt")
+LOG_FILE = str(BASE_DIR / "log.txt")
