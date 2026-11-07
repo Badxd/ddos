@@ -9,7 +9,7 @@ motor==3.6.0
 pymongo==4.9.2
 
 # Telegram Userbot
-pyrogram
+kurigram
 
 # Environment variables (.env)
 python-dotenv
