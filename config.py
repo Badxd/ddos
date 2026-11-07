@@ -30,6 +30,15 @@ ADMIN_IDS = [
     if admin.strip()
 ]
 
+# Attack configs
+COOLDOWN_TIME = 0
+DEFAULT_THREADS = 100
+MAX_THREADS = 1000
+MAX_DURATION = 1000
+DEFAULT_DURATION = 60
+PAYLOAD_SIZE = 1024
+
+
 # File paths
 USER_FILE = BASE_DIR / "users.txt"
 LOG_FILE = BASE_DIR / "log.txt"
